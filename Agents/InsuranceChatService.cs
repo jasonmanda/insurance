@@ -6,6 +6,7 @@ using Insurance.AI.Api.Repositories;
 using Insurance.AI.Api.Security;
 using Microsoft.Agents.AI;
 using Insurance.AI.Api.Contracts;
+using System.Runtime.CompilerServices;
 
 namespace Insurance.AI.Api.Agents;
 
@@ -172,4 +173,88 @@ public sealed class InsuranceChatService
 
         return TimeSpan.FromSeconds(seconds + jitter);
     }
+
+
+    public async IAsyncEnumerable<ChatStreamEvent> StreamMessageAsync(
+        string message,
+        Guid? conversationId = null,
+        [EnumeratorCancellation] CancellationToken cancellationToken = default)
+    {
+        var userId = _currentUser.UserId;
+        var agent = _agentFactory.CreateAgent();
+
+        AgentSession session;
+        var isNewConversation = !conversationId.HasValue;
+
+        AIConversation? conversation = null;
+
+        if (isNewConversation)
+        {
+            session = await agent.CreateSessionAsync(cancellationToken);
+
+            var initialSession = await agent.SerializeSessionAsync(
+                session,
+                cancellationToken: cancellationToken);
+
+            conversation = new AIConversation
+            {
+                Id = Guid.NewGuid(),
+                UserId = userId,
+                Title = message.Length > 80 ? message[..80] : message,
+                SessionData = initialSession.GetRawText()
+            };
+
+            await _repository.CreateAsync(conversation, cancellationToken);
+
+            conversationId = conversation.Id;
+        }
+        else
+        {
+            conversation = await _repository.GetByIdAsync(
+                conversationId!.Value,
+                userId,
+                cancellationToken);
+
+            if (conversation is null)
+                throw new KeyNotFoundException("Conversation not found.");
+
+            using var document = JsonDocument.Parse(conversation.SessionData);
+
+            session = await agent.DeserializeSessionAsync(
+                document.RootElement.Clone(),
+                cancellationToken: cancellationToken);
+        }
+
+        yield return new ChatStreamEvent(
+            "start",
+            conversationId);
+
+        await foreach (var update in agent.RunStreamingAsync(
+            message,
+            session,
+            cancellationToken: cancellationToken))
+        {
+            if (!string.IsNullOrEmpty(update.Text))
+            {
+                yield return new ChatStreamEvent(
+                    "chunk",
+                    Content: update.Text);
+            }
+        }
+
+        var serializedSession = await agent.SerializeSessionAsync(
+            session,
+            cancellationToken: cancellationToken);
+
+        await _repository.UpdateSessionAsync(
+            conversationId!.Value,
+            userId,
+            serializedSession.GetRawText(),
+            cancellationToken);
+
+        yield return new ChatStreamEvent(
+            "completed",
+            conversationId);
+    }
+
 }

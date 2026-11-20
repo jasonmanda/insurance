@@ -3,6 +3,10 @@ using Google.GenAI;
 using Insurance.AI.Api.Services;
 using Microsoft.Agents.AI;
 using Microsoft.Extensions.AI;
+using OpenAI;
+using System.ClientModel;
+
+using OpenAIChatClient = OpenAI.Chat.ChatClient;
 
 namespace Insurance.AI.Api.Agents;
 
@@ -21,26 +25,20 @@ public sealed class InsuranceAgentFactory
 
     public AIAgent CreateAgent()
     {
-        var apiKey = Environment.GetEnvironmentVariable(
-            "GOOGLE_GENAI_API_KEY");
-
-        if (string.IsNullOrWhiteSpace(apiKey))
-        {
-            throw new InvalidOperationException(
-                "GOOGLE_GENAI_API_KEY is not configured.");
-        }
-
+        var provider = _configuration["AI:Provider"] ?? "Gemini";
         var model = _configuration["AI:Model"]
                     ?? "gemini-2.5-flash";
 
-        // Initialize Google Gemini
-        var geminiClient = new Client(apiKey: apiKey);
+        IChatClient chatClient = provider.ToLowerInvariant() switch
+        {
+            "ollama" => CreateOllamaClient(model),
 
-        // Adapt Gemini to Microsoft's IChatClient
-        IChatClient chatClient =
-            geminiClient.AsIChatClient(model);
+            "gemini" => CreateGeminiClient(model),
 
-        // Create the Microsoft Agent Framework agent
+            _ => throw new InvalidOperationException(
+                $"Unsupported AI provider: {provider}")
+        };
+
         return new ChatClientAgent(
             chatClient,
             instructions: """
@@ -67,5 +65,41 @@ public sealed class InsuranceAgentFactory
                 AIFunctionFactory.Create(
                     _tools.GetNextRenewalAmountAsync)
             ]);
+    }
+
+    private IChatClient CreateOllamaClient(string model)
+    {
+        var baseUrl = _configuration["AI:BaseUrl"]
+            ?? "http://localhost:11434/v1";
+
+        var apiKey = _configuration["AI:ApiKey"] ?? "ollama";
+
+        var options = new OpenAIClientOptions
+        {
+            Endpoint = new Uri(baseUrl)
+        };
+
+        var client = new OpenAIChatClient(
+            model,
+            new ApiKeyCredential(apiKey),
+            options);
+
+        return client.AsIChatClient();
+    }
+
+    private IChatClient CreateGeminiClient(string model)
+    {
+        var apiKey = Environment.GetEnvironmentVariable(
+            "GOOGLE_GENAI_API_KEY");
+
+        if (string.IsNullOrWhiteSpace(apiKey))
+        {
+            throw new InvalidOperationException(
+                "GOOGLE_GENAI_API_KEY is not configured.");
+        }
+
+        var geminiClient = new Client(apiKey: apiKey);
+
+        return geminiClient.AsIChatClient(model);
     }
 }

@@ -7,7 +7,7 @@ using Npgsql;
 using Insurance.AI.Api.Repositories;
 using Microsoft.AspNetCore.Authentication.JwtBearer;
 using Microsoft.IdentityModel.Tokens;
-
+using System.Text.Json;
 
 var builder = WebApplication.CreateBuilder(args);
 
@@ -125,6 +125,48 @@ app.MapPost("/api/assistant/chat", async (
         return Results.Problem(
             title: "Service IA temporairement indisponible",
             statusCode: StatusCodes.Status503ServiceUnavailable);
+    }
+})
+.RequireAuthorization();
+
+
+app.MapPost("/api/assistant/chat/stream", async (
+    ChatRequest request,
+    HttpContext httpContext,
+    InsuranceChatService chatService,
+    CancellationToken cancellationToken) =>
+{
+    if (string.IsNullOrWhiteSpace(request.Message))
+    {
+        httpContext.Response.StatusCode = StatusCodes.Status400BadRequest;
+        return;
+    }
+
+    httpContext.Response.Headers.ContentType = "text/event-stream";
+    httpContext.Response.Headers.CacheControl = "no-cache";
+    httpContext.Response.Headers.Append("X-Accel-Buffering", "no");
+
+    try
+    {
+        await foreach (var streamEvent in chatService.StreamMessageAsync(
+            request.Message,
+            request.ConversationId,
+            cancellationToken))
+        {
+            var json = JsonSerializer.Serialize(streamEvent);
+
+            await httpContext.Response.WriteAsync(
+                $"data: {json}\n\n",
+                cancellationToken);
+
+            await httpContext.Response.Body.FlushAsync(
+                cancellationToken);
+        }
+    }
+    catch (OperationCanceledException)
+        when (cancellationToken.IsCancellationRequested)
+    {
+        // Le client a interrompu la connexion.
     }
 })
 .RequireAuthorization();
